@@ -3,7 +3,6 @@ from datetime import timedelta
 from json import loads
 from os import environ
 from sendgrid import SendGridAPIClient
-from dotenv import load_dotenv
 from python_http_client.exceptions import HTTPError
 
 
@@ -46,58 +45,60 @@ def getSuppressionList(sg, suppressionType, params, headers):
     return output
 
 
-################
-## INITIALISE ##
-################
+def lambda_handler(event, context):
 
-# Set up SendGrid API client
-load_dotenv()
-sg = SendGridAPIClient(api_key=environ.get('SENDGRID_API_KEY'))
-headers = {'Accept': 'application/json'}
-output = ''
+    ################
+    ## INITIALISE ##
+    ################
 
+    # Set up SendGrid API client
+    sg = SendGridAPIClient(api_key=environ.get('SENDGRID_API_KEY'))
+    headers = {'Accept': 'application/json'}
+    output = ''
 
-####################
-## BOUNCES/BLOCKS ##
-####################
+    ####################
+    ## BOUNCES/BLOCKS ##
+    ####################
 
-# For bounces and blocks, we'll retrieve the last 24 hours of data
-now = datetime.now()
-startTime = now - timedelta(days=1)
+    # For bounces and blocks, we'll retrieve the last 24 hours of data
+    now = datetime.now()
+    startTime = now - timedelta(days=1)
 
-# Suppressions API uses Unix timestamps for start_time and end_time
-params = {'start_time': int(startTime.timestamp()),
-          'end_time': int(now.timestamp())}
-output += getSuppressionList(sg, 'bounces', params, headers) + '\n\n'
-output += getSuppressionList(sg, 'blocks', params, headers) + '\n\n'
+    # Suppressions API uses Unix timestamps for start_time and end_time
+    params = {'start_time': int(startTime.timestamp()),
+              'end_time': int(now.timestamp())}
+    output += getSuppressionList(sg, 'bounces', params, headers) + '\n\n'
+    output += getSuppressionList(sg, 'blocks', params, headers) + '\n\n'
 
+    ###########
+    ## STATS ##
+    ###########
 
-###########
-## STATS ##
-###########
+    # Stats API uses string (yyyy-mm-dd) for start_time and end_time.
+    # Here we select the first day of the current month
+    params = {'aggregated_by': 'month', 'start_date': datetime(
+        now.year, now.month, 1).strftime('%Y-%m-%d')}
+    output += "{0} STATS {0}\n".format('#' * 12)
 
-# Stats API uses string (yyyy-mm-dd) for start_time and end_time.
-# Here we select the first day of the current month
-params = {'aggregated_by': 'month', 'start_date': datetime(
-    now.year, now.month, 1).strftime('%Y-%m-%d')}
-output += "{0} STATS {0}\n".format('#' * 12)
+    try:
+        response = sg.client.stats.get(
+            query_params=params, request_headers=headers)
+    except HTTPError as e:
+        output += str(e.to_dict)
 
-try:
-    response = sg.client.stats.get(
-        query_params=params, request_headers=headers)
-except HTTPError as e:
-    output += str(e.to_dict)
+    if response.status_code != 200:
+        output += "Error: HTTP Status Code {0}\n".format(response.status_code)
 
-if response.status_code != 200:
-    output += "Error: HTTP Status Code {0}\n".format(response.status_code)
+    else:
+        # Convert JSON response to list
+        results = loads(response.body.decode('utf-8'))
+        requestsThisMonth = results[0]['stats'][0]['metrics']['requests']
+        output += "Requests (quota utilisation) so far this month: {0}\n".format(
+            requestsThisMonth)
 
-else:
-    # Convert JSON response to list
-    results = loads(response.body.decode('utf-8'))
-    requestsThisMonth = results[0]['stats'][0]['metrics']['requests']
-    output += "Requests (quota utilisation) so far this month: {0}\n".format(
-        requestsThisMonth)
+    output += checkAPIUsage(response.headers)
 
-output += checkAPIUsage(response.headers)
-
-print(output)
+    return {
+        'statusCode': 200,
+        'body': output
+    }
